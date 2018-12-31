@@ -6,18 +6,12 @@
 
 // NOTE: prevailing assumption is a release's target_commitish is always a SHA.
 
-const generateChangelog = require('./generate-changelog');
-const generateMigrationGuide = require('./generate-migration-guide');
+const getConfig = require('probot-config');
 
-const releasesForCommit = require('./releases-for-commit');
-const prForCommit = require('./pr-for-commit');
+const generateChangelog = require('./generate-changelog');
 
 module.exports = robot => {
   robot.on('release', handler);
-
-  robot.on('pull_request.edited', update);
-  robot.on('pull_request.labeled', update);
-  robot.on('pull_request.unlabeled', update);
 
   async function handler(context) {
     const release = context.payload.release;
@@ -30,28 +24,7 @@ module.exports = robot => {
       releasesBySha,
       [release.target_commitish],
     );
-    const body = await notesForCommits(context, commits);
 
-    updateRelease(context, release, body);
-  }
-
-  async function update(context) {
-    const pr = context.payload.pull_request;
-    if (!pr.merged) {
-      return;
-    }
-
-    const repo = context.payload.repository.full_name;
-    const releases = await releasesForCommit(repo, pr.merge_commit_sha);
-
-    const {releasesBySha, tagShas} = await getReleaseInfo(context, releases);
-
-    const {commits, release} = await getChangeInfo(
-      context,
-      pr.merge_commit_sha,
-      releasesBySha,
-      tagShas,
-    );
     const body = await notesForCommits(context, commits);
 
     updateRelease(context, release, body);
@@ -60,31 +33,13 @@ module.exports = robot => {
 
 async function updateRelease(context, release, body) {
   const {github} = context;
-  github.repos.editRelease(
+  github.repos.updateRelease(
     context.repo({
-      id: release.id,
+      release_id: release.id,
       tag_name: release.tag_name,
       body,
     }),
   );
-}
-
-// fetches all releases
-// also finds releases corresponding to provided tags
-async function getReleaseInfo(context, childTags) {
-  const tagShas = [];
-
-  const releasesBySha = await fetchAllReleases(context, release => {
-    if (childTags.has(release.tag_name)) {
-      // put in reverse order
-      // later releases come first,
-      // but we want to iterate beginning oldest releases first
-      tagShas.unshift(release.target_commitish);
-      // tagSha.push(release.target_commitish);
-    }
-  });
-
-  return {releasesBySha, tagShas};
 }
 
 async function fetchAllReleases(context, handler = () => {}) {
@@ -143,54 +98,86 @@ async function getChangeInfo(
 
 async function notesForCommits(context, commits) {
   const {github} = context;
-  const repo = context.payload.repository.full_name;
-  const prs = await Promise.all(commits.map(sha => prForCommit(repo, sha)));
 
-  const issues = await Promise.all(
-    prs.filter(Boolean).map(number =>
-      github.issues.get(
-        context.repo({
-          number,
-        }),
-      ),
-    ),
+  const prs = [];
+  const req = await github.pullRequests.list(
+    context.repo({
+      per_page: 100,
+      state: 'closed',
+    }),
   );
 
-  let changes = issues.map(issue => ({
-    labels: issue.data.labels,
-    title: issue.data.title,
-    number: issue.data.number,
-    url: issue.data.html_url,
-  }));
-
-  const config = await context.config('release-notes.yml', {
-    labels: [
-      'security',
-      'breaking',
-      'interface',
-      'bugfix',
-      'dependencies',
-      'performance',
-    ],
-    ignore: ['release'],
+  await fetchPages(github, req, async results => {
+    results.data.forEach(async pr => {
+      if (commits.includes(pr.merge_commit_sha)) {
+        prs.push({
+          labels: pr.labels,
+          title: pr.title,
+          number: pr.number,
+          url: pr.html_url,
+        });
+      }
+    });
   });
 
-  changes = changes.filter(change => {
-    return !change.labels.some(label => config.ignore.includes(label.name));
-  });
+  const config = await getConfig(context, 'release.yml', {}, {});
 
-  const prNums = changes.reduce((acc, change) => {
-    return acc.add(change.number);
-  }, new Set());
+  if (!config.changelog) {
+    config.changelog = {};
+  }
 
-  const changelog = generateChangelog(changes, config.labels);
-  const guide = await generateMigrationGuide(context, prNums);
+  if (!config.changelog.sections) {
+    config.changelog.sections = {};
+  }
 
-  return [
-    '## Changelog',
-    changelog,
-    ...(guide ? ['## Migration Guide', guide] : []),
-  ].join('\n');
+  if (!config.changelog.sections.security) {
+    config.changelog.sections.security = 'security';
+  }
+
+  if (!config.changelog.sections.features) {
+    config.changelog.sections.features = 'features';
+  }
+
+  if (!config.changelog.sections.bugfixes) {
+    config.changelog.sections.bugfixes = 'bugfixes';
+  }
+
+  if (!config.changelog.ignoredLabels) {
+    config.changelog.ignoredLabels = ['release'];
+  }
+
+  let changes = {
+    security: [],
+    features: [],
+    bugfixes: [],
+    other: [],
+  };
+
+  for (let pr of prs) {
+    if (
+      pr.labels.some(label =>
+        config.changelog.ignoredLabels.includes(label.name),
+      )
+    ) {
+      continue;
+    } else if (
+      pr.labels.some(label => config.changelog.sections.security === label.name)
+    ) {
+      changes.security.push(pr);
+    } else if (
+      pr.labels.some(label => config.changelog.sections.features === label.name)
+    ) {
+      changes.features.push(pr);
+    } else if (
+      pr.labels.some(label => config.changelog.sections.bugfixes === label.name)
+    ) {
+      changes.bugfixes.push(pr);
+    } else {
+      changes.other.push(pr);
+    }
+  }
+
+  return generateChangelog(changes);
 }
 
 function buildCommits(commitsBySha, releaseSha, prevReleaseSha) {

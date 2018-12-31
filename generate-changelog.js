@@ -4,93 +4,44 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-module.exports = function generateChangelog(changes, labelWeight) {
-  const indexed = indexByWeight(changes, labelWeight);
+module.exports = function generateChangelog(changes) {
+  let lines = ['## Release Notes'];
 
-  const [weighted, nonweighted] = partitionMap(
-    indexed,
-    ([weight]) => weight > 0,
-  );
-
-  let lines = [];
-
-  if (weighted.length) {
-    lines.push('### Highlighted Changes');
-    for (let [, value] of weighted) {
-      lines.push(changeSection(value.labels));
-
-      for (let change of value.changes) {
-        lines.push(changeItem(change, true));
-      }
+  if (changes.security.length > 0) {
+    lines.push('### Security Updates');
+    for (let change of changes.security) {
+      lines.push(getChangeItem(change));
     }
   }
 
-  if (nonweighted.length) {
-    if (weighted.length) {
-      lines.push('');
-      lines.push('### Other Changes');
-    }
-    for (let [, value] of nonweighted) {
-      for (let change of value.changes) {
-        lines.push(changeItem(change, false));
-      }
+  if (changes.features.length > 0) {
+    lines.push('### New Features');
+    for (let change of changes.features) {
+      lines.push(getChangeItem(change));
     }
   }
 
-  if (!nonweighted.length && !weighted.length) {
-    lines.push('No pull requests in this release');
+  if (changes.bugfixes.length > 0) {
+    lines.push('### Bug Fixes');
+    for (let change of changes.bugfixes) {
+      lines.push(getChangeItem(change));
+    }
+  }
+
+  if (changes.other.length > 0) {
+    lines.push('### Other Changes');
+    for (let change of changes.other) {
+      lines.push(getChangeItem(change));
+    }
+  }
+
+  if (lines.length === 1) {
+    lines.push('No release notes available for this release.');
   }
 
   return lines.join('\n');
 };
 
-function partitionMap(map, filter) {
-  return filterMap(map, [filter, (...args) => !filter(...args)]);
-}
-
-function filterMap(map, filters) {
-  return filters.map(filter => Array.from(map.entries()).filter(filter));
-}
-
-/**
- * Calculates the weight of a given array of labels
- */
-function getWeight(labels, labelWeight) {
-  const places = labels.map(label => labelWeight.indexOf(label.name));
-  let binary = '';
-  for (let i = 0; i < labelWeight.length; i++) {
-    binary += places.includes(i) ? '1' : '0';
-  }
-  return parseInt(binary, 2);
-}
-
-function indexByWeight(changes, labelWeight) {
-  const index = new Map();
-  for (let change of changes) {
-    const weight = getWeight(change.labels, labelWeight);
-    if (!index.has(weight)) {
-      index.set(weight, {
-        changes: new Set(),
-        labels: change.labels
-          .filter(label => labelWeight.includes(label.name))
-          .sort(label => labelWeight.indexOf(label.name)),
-      });
-    }
-    index.get(weight).changes.add(change);
-  }
-  return index;
-}
-
-function changeSection(labels) {
-  return `<div>${labels
-    .map(label => `<img src="${labelImage(label)}"/>`)
-    .join(' ')}</div>\n`;
-}
-
-function changeItem(pr, indent = false) {
-  return `${indent ? '  ' : ''}- ${pr.title} ([#${pr.number}](${pr.url}))`;
-}
-
-function labelImage({color, name}) {
-  return `https://gh-label-svg.now.sh/label.svg?color=${color}&text=${name}`;
+function getChangeItem(pr) {
+  return `* ${pr.title} ([#${pr.number}](${pr.url}))`;
 }
